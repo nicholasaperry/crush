@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -83,6 +84,10 @@ crush run --continue "Follow up on your last response"
 
 		if prompt == "" {
 			return fmt.Errorf("no prompt provided")
+		}
+
+		if !verbose {
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		}
 
 		event.SetNonInteractive(true)

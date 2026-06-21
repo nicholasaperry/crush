@@ -20,6 +20,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/ollama"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
@@ -35,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/ollama/ollama/engine"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
@@ -98,6 +100,7 @@ type coordinator struct {
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
+	inference    *engine.Engine
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -118,6 +121,7 @@ func NewCoordinator(
 	lspManager *lsp.Manager,
 	notify pubsub.Publisher[notify.Notification],
 	skillsMgr *skills.Manager,
+	inference *engine.Engine,
 ) (Coordinator, error) {
 	// Skills are pre-discovered by the caller (see app.New /
 	// backend.CreateWorkspace) and passed in via the manager. If no
@@ -145,6 +149,7 @@ func NewCoordinator(
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
+		inference:    inference,
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -629,6 +634,25 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		}
 	}
 
+	if largeCatwalkModel == nil && string(largeProviderCfg.Type) == ollama.Type {
+		largeCatwalkModel = &catwalk.Model{
+			ID:               largeModelCfg.Model,
+			Name:             largeModelCfg.Model,
+			ContextWindow:    32768,
+			DefaultMaxTokens: 4096,
+			CanReason:        true,
+		}
+	}
+	if smallCatwalkModel == nil && string(smallProviderCfg.Type) == ollama.Type {
+		smallCatwalkModel = &catwalk.Model{
+			ID:               smallModelCfg.Model,
+			Name:             smallModelCfg.Model,
+			ContextWindow:    32768,
+			DefaultMaxTokens: 4096,
+			CanReason:        true,
+		}
+	}
+
 	if largeCatwalkModel == nil {
 		return Model{}, Model{}, errLargeModelNotFound
 	}
@@ -902,6 +926,8 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 		return c.buildGoogleProvider(baseURL, apiKey, headers)
 	case "google-vertex":
 		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
+	case ollama.Type:
+		return ollama.NewProvider(c.inference, providerCfg.Models), nil
 	case openaicompat.Name, hyper.Name:
 		switch providerCfg.ID {
 		case hyper.Name:

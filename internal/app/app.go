@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/ollama"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -42,6 +43,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/charmbracelet/x/term"
+	"github.com/ollama/ollama/engine"
 )
 
 // UpdateAvailableMsg is sent when a new version is available.
@@ -75,6 +77,8 @@ type App struct {
 	globalCtx          context.Context
 	cleanupFuncs       []func(context.Context) error
 	agentNotifications *pubsub.Broker[notify.Notification]
+
+	inference *engine.Engine
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -83,8 +87,43 @@ type App struct {
 // skills.NewManager + skills.DiscoverFromConfig).
 func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr *skills.Manager) (*App, error) {
 	q := db.New(conn)
+
+	events := pubsub.NewBroker[tea.Msg]()
+
+	var inferEng *engine.Engine
+	ollama.InitLlamaServerPath()
+	if os.Getenv("CRUSH_OLLAMA") == "1" && os.Getenv("OLLAMA_DEBUG") == "" {
+		_ = os.Setenv("OLLAMA_DEBUG", "WARN")
+	}
+
+	engineOpts := engine.Options{}
+	if os.Getenv("CRUSH_OLLAMA") == "1" {
+		if w := log.FileWriter(); w != nil {
+			parseBridge := ollama.NewLogBridge(events, nil)
+			subprocessBridge := ollama.NewLogBridge(events, w)
+			engineOpts = engine.Options{
+				LogWriter:        io.MultiWriter(w, parseBridge),
+				SubprocessOutput: subprocessBridge,
+			}
+		}
+	}
+	if eng, err := engine.New(ctx, engineOpts); err != nil {
+		slog.Warn("in-process ollama engine unavailable", "error", err)
+	} else {
+		inferEng = eng
+		if err := config.ApplyOllamaProvider(ctx, store, inferEng); err != nil {
+			slog.Warn("ollama provider setup", "error", err)
+		}
+	}
+
+	msgOpts := []message.ServiceOption{}
+	if inferEng != nil {
+		if p, ok := store.Config().Providers.Get(config.OllamaProviderID); ok && string(p.Type) == config.TypeOllama {
+			msgOpts = append(msgOpts, message.WithDebounce(0))
+		}
+	}
 	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	messages := message.NewService(q, msgOpts...)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
 	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
@@ -106,10 +145,18 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 
 		config: store,
 
-		events:             pubsub.NewBroker[tea.Msg](),
+		events:             events,
 		serviceEventsWG:    &sync.WaitGroup{},
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
+		inference:          inferEng,
+	}
+
+	if inferEng != nil {
+		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+			inferEng.Close()
+			return nil
+		})
 	}
 
 	app.setupEvents()
@@ -541,6 +588,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.LSPManager,
 		app.agentNotifications,
 		app.Skills,
+		app.inference,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

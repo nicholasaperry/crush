@@ -1,6 +1,8 @@
 package styles
 
-import "github.com/charmbracelet/x/exp/charmtone"
+import (
+	"github.com/charmbracelet/x/exp/charmtone"
+)
 
 // ThemeForProvider returns the Styles associated with the given provider
 // ID. Unknown or empty provider IDs yield the default Charmtone Pantera

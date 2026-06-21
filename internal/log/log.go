@@ -18,11 +18,17 @@ import (
 var (
 	initOnce    sync.Once
 	initialized atomic.Bool
+	rotator     *lumberjack.Logger
 )
+
+// FileWriter returns the shared crush.log rotator after Setup, or nil before Setup.
+func FileWriter() io.Writer {
+	return rotator
+}
 
 func Setup(logFile string, debug bool, ws ...io.Writer) {
 	initOnce.Do(func() {
-		logRotator := &lumberjack.Logger{
+		rotator = &lumberjack.Logger{
 			Filename:   logFile,
 			MaxSize:    10,    // Max size in MB
 			MaxBackups: 0,     // Number of backups
@@ -30,7 +36,7 @@ func Setup(logFile string, debug bool, ws ...io.Writer) {
 			Compress:   false, // Enable compression
 		}
 
-		level := slog.LevelInfo
+		level := slog.LevelWarn
 		if debug {
 			level = slog.LevelDebug
 		}
@@ -41,7 +47,7 @@ func Setup(logFile string, debug bool, ws ...io.Writer) {
 		}
 
 		var handlers []slog.Handler
-		handlers = append(handlers, slog.NewJSONHandler(logRotator, opts))
+		handlers = append(handlers, slog.NewJSONHandler(rotator, opts))
 
 		for _, w := range ws {
 			if w == nil {
